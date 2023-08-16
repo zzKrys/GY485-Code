@@ -1,0 +1,430 @@
+---
+title: "Spatial Regression"
+author: "Yu Zhou"
+date: "2023-07-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load library
+```{r}
+library(sf)
+library(tidyverse)
+library(fixest)
+library(car)
+library(spatialreg)
+library(spdep)
+library(lmtest)
+library(tidyverse)
+library(ggplot2)
+library(sf)
+library(tmap)
+library(gridExtra)
+library(e1071)
+library(spatstat)
+library(geojsonio)
+library(gstat)
+library(raster)
+library(spdep)
+library(osrm)
+library(osmdata)
+library(ggmap)
+library(RColorBrewer)
+library(fixest)
+library(car)
+library(tmaptools)
+library(OpenStreetMap)
+library(sp)
+library(gstat)
+library(tmap)
+library(classInt)
+library(viridis)
+library(viridisLite)
+library(ggsn)
+library(ggspatial)
+library(prettymapr)
+library(sp)
+library(spdep)
+library(osrm)
+```
+
+# Import data
+```{r}
+Listings <- read.csv("Total_Listings.csv") %>% dplyr::select(-X) 
+```
+
+
+# OLS
+
+## base
+```{r}
+ols1 <- feols(lnPrice ~ accommodates + bathrooms + bedrooms + amenities_num +
+              number_of_reviews_l30d + 
+              review_scores_location + review_scores_value + 
+              availability_60 + instant_bookable +
+              host_is_superhost + host_identity_verified +
+              calculated_host_listings_count +
+              restaurant_1km + mall_dist + convenience_500m + 
+              bus_stop_500m + subway_entrance_dist + railway_station_dist +
+              attraction_dist + museum_dist + theatre_dist,
+              data = Listings)
+
+summary(ols1) # 0.55534
+vif(ols1)
+```
+
+
+## base + control neighbourhood_cleansed 
+```{r}
+ols2 <- feols(lnPrice ~ accommodates + bathrooms + bedrooms + amenities_num +
+              number_of_reviews_l30d + 
+              review_scores_location + review_scores_value + 
+              availability_60 + instant_bookable +
+              host_is_superhost + host_identity_verified +
+              calculated_host_listings_count +
+              restaurant_1km + mall_dist + convenience_500m + 
+              bus_stop_500m + subway_entrance_dist + railway_station_dist +
+              attraction_dist + museum_dist + theatre_dist
+              | neighbourhood_cleansed,
+            data = Listings)
+
+summary(ols2) # 0.577691
+vif(ols2)
+```
+
+
+# Spatial Regression
+## Create Continuity Neighbours (weights)
+
+### knn = 5
+```{r}
+w_listings <- Listings
+
+w_listings$instant_bookable <- as.numeric(w_listings$instant_bookable)
+w_listings$host_is_superhost <- as.numeric(w_listings$host_is_superhost)
+w_listings$host_identity_verified <- as.numeric(w_listings$host_identity_verified)
+
+# The Coordinate Reference System (CRS)
+w_listings_sf <- w_listings %>% 
+  st_as_sf(coords = c("longitude", "latitude")) %>%  # create sf
+  st_set_crs(4326) %>%
+  st_transform(27700) 
+
+
+# Extract coordinates from the 'sf' object
+coords <- st_coordinates(w_listings_sf)
+
+# Add small jitter to the coordinates to handle identical points
+coords <- jitter(coords, factor = 1e-10) # Adjust the jitter factor as needed
+
+
+# Convert to neighborhood objects - knn = 5
+W_knn5 <- knn2nb(knearneigh(coords, k=5), row.names = Listings_sf$ID)
+W_knn5_mat <- nb2listw(W_knn5)
+
+
+cat("\n Neighb. of obs. 1: ", W_knn5_mat$neighbours[[1]])
+cat("\n Weights of obs. 1: ", W_knn5_mat$weights[[1]])
+```
+
+## Moran test
+```{r}
+moran_test <- function(data, variable, listw){
+  variable <- c(variable)
+  
+  for(v in variable){
+    if(v %in% names(data)){
+      print(paste("Moran Test for", v))
+      result <- spdep::moran.test(data[[v]], listw = listw, zero.policy = TRUE)
+      print(result)
+    }
+    else{
+      print(paste("Variable", v, "not found in the data"))
+    }
+  }
+}
+
+
+
+moran_test(Listings_sf, "Price", W_knn5_mat)     # 0.2250149
+moran_test(Listings_sf, "lnPrice", W_knn5_mat) # 0.2605976
+
+moran_test(Listings_sf, "accommodates", W_knn5_mat)
+moran_test(Listings_sf, "bathrooms", W_knn5_mat)
+moran_test(Listings_sf, "bedrooms", W_knn5_mat)
+moran_test(Listings_sf, "amenities_num", W_knn5_mat)
+moran_test(Listings_sf, "number_of_reviews_l30d", W_knn5_mat)
+moran_test(Listings_sf, "review_scores_location", W_knn5_mat)
+moran_test(Listings_sf, "review_scores_value", W_knn5_mat)
+moran_test(Listings_sf, "availability_60", W_knn5_mat)
+moran_test(w_listings_sf, "instant_bookable", W_knn5_mat)
+moran_test(w_listings_sf, "host_is_superhost", W_knn5_mat)
+moran_test(w_listings_sf, "host_identity_verified", W_knn5_mat)
+moran_test(Listings_sf, "calculated_host_listings_count", W_knn5_mat)
+
+moran_test(Listings_sf, "restaurant_1km", W_knn5_mat)
+moran_test(Listings_sf, "bus_stop_500m", W_knn5_mat)
+moran_test(Listings_sf, "subway_entrance_dist_km", W_knn5_mat)
+moran_test(Listings_sf, "railway_station_dist_km", W_knn5_mat)
+moran_test(Listings_sf, "mall_dist_km", W_knn5_mat)
+moran_test(Listings_sf, "convenience_500m", W_knn5_mat)
+moran_test(Listings_sf, "attraction_dist_km", W_knn5_mat)
+moran_test(Listings_sf, "museum_dist_km", W_knn5_mat)
+moran_test(Listings_sf, "theatre_dist_km", W_knn5_mat)
+```
+
+
+## Add the spatial lag
+```{r}
+Listings$w_lnPrice <- lag.listw(W_knn5_mat, Listings_sf$lnPrice, zero.policy = T)
+
+
+Listings$w_accommodates <- lag.listw(W_knn5_mat, Listings_sf$accommodates, zero.policy = T)
+Listings$w_bathrooms <- lag.listw(W_knn5_mat, Listings_sf$bathrooms, zero.policy = T)
+Listings$w_bedrooms <- lag.listw(W_knn5_mat, Listings_sf$bedrooms, zero.policy = T)
+Listings$w_amenities_num <- 
+  lag.listw(W_knn5_mat, Listings_sf$amenities_num, zero.policy = T)
+
+Listings$w_number_of_reviews_l30d <- 
+  lag.listw(W_knn5_mat, Listings_sf$number_of_reviews_l30d, zero.policy = T)
+Listings$w_review_scores_location <- 
+  lag.listw(W_knn5_mat, Listings_sf$review_scores_location, zero.policy = T)
+Listings$w_review_scores_value <- 
+  lag.listw(W_knn5_mat, Listings_sf$review_scores_value, zero.policy = T)
+
+Listings$w_availability_60 <- 
+  lag.listw(W_knn5_mat, Listings_sf$availability_60, zero.policy = T)
+Listings$w_instant_bookable <- 
+  round(lag.listw(W_knn5_mat, w_listings_sf$instant_bookable, zero.policy = T))
+
+Listings$w_host_is_superhost <- 
+  round(lag.listw(W_knn5_mat, w_listings_sf$host_is_superhost, zero.policy = T))
+Listings$w_host_identity_verified <- 
+  round(lag.listw(W_knn5_mat, w_listings_sf$host_identity_verified, zero.policy = T))
+Listings$w_calculated_host_listings_count <- 
+  lag.listw(W_knn5_mat, Listings_sf$calculated_host_listings_count, zero.policy = T)
+
+
+
+
+# convert the T F
+Listings$w_instant_bookable <- ifelse(Listings$w_instant_bookable == "1", TRUE, FALSE)
+Listings$w_host_is_superhost <- ifelse(Listings$w_host_is_superhost == "1", TRUE, FALSE)
+Listings$w_host_identity_verified <- 
+  ifelse(Listings$w_host_identity_verified == "1", TRUE, FALSE)
+```
+
+```{r}
+Listings_lag <- Listings %>% 
+  dplyr::select(ID, Price, lnPrice, latitude, longitude, neighbourhood_cleansed,
+                accommodates, bathrooms, bedrooms, amenities_num,
+                number_of_reviews_l30d, review_scores_location, review_scores_value,
+                availability_60, instant_bookable, 
+                host_is_superhost, host_identity_verified,
+                calculated_host_listings_count,
+                restaurant_1km, mall_dist, convenience_500m,
+                bus_stop_500m, subway_entrance_dist, railway_station_dist,
+                attraction_dist, museum_dist, theatre_dist,
+                w_lnPrice, w_accommodates, w_bathrooms, w_bedrooms, w_amenities_num,
+                w_number_of_reviews_l30d, w_review_scores_location, w_review_scores_value,
+                w_availability_60, w_instant_bookable,
+                w_host_is_superhost, w_host_identity_verified,
+                w_calculated_host_listings_count)
+
+# write.csv(Listings_lag, file = "Total_Listings_lag.csv")
+```
+
+
+### SAR
+```{r}
+sar <- feols(lnPrice ~ accommodates + bathrooms + bedrooms + amenities_num +
+              number_of_reviews_l30d + 
+              review_scores_location + review_scores_value + 
+              availability_60 + instant_bookable +
+              host_is_superhost + host_identity_verified +
+              calculated_host_listings_count +
+              restaurant_1km + mall_dist + convenience_500m +
+              bus_stop_500m + subway_entrance_dist + railway_station_dist +
+              attraction_dist + museum_dist + theatre_dist +
+              w_lnPrice
+              | neighbourhood_cleansed, 
+              data = Listings_lag)
+
+summary(sar)
+
+```
+
+
+### SLX
+```{r}
+slx <- feols(lnPrice ~ accommodates + bathrooms + bedrooms + amenities_num +
+              number_of_reviews_l30d + 
+              review_scores_location + review_scores_value + 
+              availability_60 + instant_bookable +
+              host_is_superhost + host_identity_verified +
+              calculated_host_listings_count +
+              restaurant_1km + mall_dist + convenience_500m +
+              bus_stop_500m + subway_entrance_dist + railway_station_dist +
+              attraction_dist + museum_dist + theatre_dist +
+              w_accommodates + w_bathrooms + w_bedrooms + w_amenities_num +
+              w_number_of_reviews_l30d + w_review_scores_location + w_review_scores_value +
+              w_availability_60 + w_instant_bookable + 
+              w_host_is_superhost + w_host_identity_verified +
+              w_calculated_host_listings_count
+              | neighbourhood_cleansed, 
+              data = Listings_lag)
+
+summary(slx)
+```
+
+
+
+### SDM
+```{r}
+sdm1 <- feols(lnPrice ~ accommodates + bathrooms + bedrooms + amenities_num +
+              number_of_reviews_l30d + 
+              review_scores_location + review_scores_value + 
+              availability_60 + instant_bookable +
+              host_is_superhost + host_identity_verified +
+              calculated_host_listings_count +
+              restaurant_1km + mall_dist + convenience_500m +
+              bus_stop_500m + subway_entrance_dist + railway_station_dist +
+              attraction_dist + museum_dist + theatre_dist +
+              w_lnPrice + 
+              w_accommodates + w_bathrooms + w_bedrooms + w_amenities_num +
+              w_number_of_reviews_l30d + w_review_scores_location + w_review_scores_value +
+              w_availability_60 + w_instant_bookable + 
+              w_host_is_superhost + w_host_identity_verified +
+              w_calculated_host_listings_count
+              | neighbourhood_cleansed, 
+              data = Listings_lag)
+
+summary(sdm1) 
+
+```
+
+
+
+## IV/2SLS
+
+```{r}
+correlations = Listings_lag |>
+  dplyr::select(w_lnPrice, 
+              w_accommodates, w_bathrooms, w_bedrooms, w_amenities_num,
+              w_number_of_reviews_l30d,  w_review_scores_location, w_review_scores_value,
+              w_availability_60, w_instant_bookable, 
+              w_host_is_superhost, w_host_identity_verified,
+              w_calculated_host_listings_count) |>
+  cor()
+
+correlations %>% round(2)
+correlations |> round(2)
+
+# w_lnPrice
+# w_bathrooms 0.45, w_accommodates 0.35, 
+# w_review_scores_location 0.31, w_availability_60 0.31
+
+```
+
+
+Structure to add IV to the command::
+`feols(Dep_var ~ Exo_vars | Fixed-effects | Endo_vars ~ Instruments, ...)`
+```{r}
+
+iv1 <- feols(lnPrice ~ accommodates + bathrooms + bedrooms + amenities_num +
+              number_of_reviews_l30d + 
+              review_scores_location + review_scores_value + 
+              availability_60 + instant_bookable +
+              host_is_superhost + host_identity_verified +
+              calculated_host_listings_count +
+              restaurant_1km + mall_dist + convenience_500m +
+              bus_stop_500m + subway_entrance_dist + railway_station_dist +
+              attraction_dist + museum_dist + theatre_dist +
+              w_accommodates + w_bedrooms + w_amenities_num +
+              w_number_of_reviews_l30d + w_review_scores_location + w_review_scores_value +
+              w_availability_60 + w_instant_bookable + 
+              w_host_is_superhost + w_host_identity_verified +
+              w_calculated_host_listings_count
+          | neighbourhood_cleansed | w_lnPrice ~ w_bathrooms, 
+              data = Listings_lag)
+summary(iv1) # 0.597295
+summary(iv1, stage = 1) # F-test (1st stage): stat = 1,806.8, p < 2.2e-16
+
+
+iv2 <- feols(lnPrice ~ accommodates + bathrooms + bedrooms + amenities_num +
+              number_of_reviews_l30d + 
+              review_scores_location + review_scores_value + 
+              availability_60 + instant_bookable +
+              host_is_superhost + host_identity_verified +
+              calculated_host_listings_count +
+              restaurant_1km + mall_dist + convenience_500m +
+              bus_stop_500m + subway_entrance_dist + railway_station_dist +
+              attraction_dist + museum_dist + theatre_dist +
+               w_bedrooms + w_amenities_num +
+              w_number_of_reviews_l30d + w_review_scores_location + w_review_scores_value +
+              w_availability_60 + w_instant_bookable + 
+              w_host_is_superhost + w_host_identity_verified +
+              w_calculated_host_listings_count
+          | neighbourhood_cleansed | w_lnPrice ~ w_accommodates + w_bathrooms, 
+              data = Listings_lag)
+summary(iv2)  # 0.597109
+summary(iv2, stage = 1) # F-test (1st stage): stat = 1,055.0, p < 2.2e-16
+
+```
+ 
+```{r}
+etable(ols1, ols2, sar, slx, sdm1, iv1)
+```
+
+
+# Heatmap 
+```{r}
+correlations = Listings_lag |>
+  dplyr::select(lnPrice,
+         accommodates, bathrooms, bedrooms, amenities_num,
+         number_of_reviews_l30d, review_scores_location, review_scores_value,
+         availability_60, instant_bookable, 
+         host_is_superhost, host_identity_verified,
+         calculated_host_listings_count,
+         restaurant_1km, mall_dist, convenience_500m,
+         bus_stop_500m, subway_entrance_dist, railway_station_dist,
+         attraction_dist, museum_dist, theatre_dist,
+         w_lnPrice, 
+         w_accommodates, w_bathrooms, w_bedrooms, w_amenities_num,
+         w_number_of_reviews_l30d, w_review_scores_location, w_review_scores_value,
+         w_availability_60, w_instant_bookable,
+         w_host_is_superhost, w_host_identity_verified,
+         w_calculated_host_listings_count) |>
+  cor()
+
+
+# Melt the correlation matrix for ggplot2
+melted_correlations <- reshape2::melt(correlations)
+melted_correlations$Var1 <- factor(melted_correlations$Var1, levels = rev(levels(melted_correlations$Var1)))
+
+# Create the heatmap
+heatmap <- ggplot(data = melted_correlations, aes(x=Var2, y=Var1, fill=value)) + 
+  geom_tile() +
+  geom_text(aes(label = round(value, 2)), size = 4.6) +
+  theme(axis.text.x = element_text(angle = 90, hjust=1)) +
+  scale_fill_distiller(palette = "RdYlBu",
+                       guide = guide_colourbar(title = NULL, barheight = unit(0.8, "npc"), 
+                                               barwidth = 0.5, 
+                                               label.theme = element_text(size = 15)),
+                       limits = c(-1, 1)) +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(vjust = 1, angle = 90,
+                                   size = 17, hjust = 1),
+        axis.text.y = element_text(size = 17)) +
+  xlab("") + 
+  ylab("")
+
+print(heatmap)
+
+ggsave("heatmap.png", plot = heatmap, height = 20, width = 20, units = "in")
+```
+
+

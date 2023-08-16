@@ -1,0 +1,814 @@
+---
+title: "March Airbnb Listings"
+author: "Yu Zhou"
+date: "2023-07-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load library
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(sf)
+library(tmap)
+library(gridExtra)
+library(e1071)
+library(spatstat)
+library(geojsonio)
+library(gstat)
+library(raster)
+library(spdep)
+library(osrm)
+library(osmdata)
+library(ggmap) # Google's Terms of Service: <https://mapsplatform.google.com>
+# ℹ Please cite ggmap if you use it! Use `citation("ggmap")` for details.
+library(RColorBrewer)
+library(fixest)
+library(car)
+library(tmaptools)
+library(OpenStreetMap)
+library(sp)
+library(gstat)
+library(tmap)
+library(classInt)
+library(viridis)
+library(viridisLite)
+library(ggsn)
+library(ggspatial)
+library(prettymapr)
+library(sp)
+library(spdep)
+library(osrm)
+```
+
+# Import data
+
+This dataset is based on the 2023-03-14 London extract from Inside Airbnb. The original set includes AirBnb property listings with characteristics and price, and this is extended to additional variables based on each property's location.
+
+```{r}
+# listing <- read.csv("data/listings.csv") # 75241 obs. / 75 variables
+
+neighbourhoods <- st_read("data/borough/neighbourhoods.geojson")
+borough_sf <- neighbourhoods %>% st_transform(st_crs(listings_sf))
+# st_write(neighbourhoods_sf, "neighbourhoods.shp")
+```
+
+
+```{r}
+listings <- nn %>% 
+  mutate(ID = row_number()) %>% 
+  dplyr::select(ID, Price, lnPrice, latitude, longitude, neighbourhood_cleansed,
+              accommodates, bathrooms, bedrooms, amenities_num,
+              number_of_reviews_l30d, review_scores_location, review_scores_value,
+              availability_60, instant_bookable, 
+              host_is_superhost, host_identity_verified,
+              calculated_host_listings_count)
+  
+# 31,656 × 18
+```
+
+
+## Convert data
+
+```{r}
+# The Coordinate Reference System (CRS)
+listings_sf <- listings %>% 
+  st_as_sf(coords = c("longitude", "latitude")) %>%  # create sf
+  st_set_crs(4326) %>%
+  st_transform(27700) 
+
+
+Price_sf <- listings %>% 
+  dplyr::select(ID, longitude, latitude, Price, lnPrice, neighbourhood_cleansed) %>% 
+  st_as_sf(coords = c("longitude", "latitude")) %>%  # create sf
+  st_set_crs(4326) %>%
+  st_transform(27700) 
+
+
+Price <- listings %>% 
+  dplyr::select(ID, longitude, latitude, Price, lnPrice, neighbourhood_cleansed)
+# write.csv(Price, file = "price_kepler.csv")
+# write.csv(listings, file = "listings.csv")
+```
+
+# POI
+
+## specify London area
+
+```{r}
+London_area <- opq(bbox = "London")
+# "51.2867601,-0.5103751,51.6918741,0.3340155"
+
+
+# remove all fields with missing values
+not_all_na <- function(x) any(!is.na(x))
+```
+
+## get all the POI number from London
+
+```{r}
+# Define the function
+get_feature <- function(key, value) {
+  
+  query <- London_area %>% add_osm_feature(key = key, value = value) 
+  osm_feature <- osmdata_sf(query)
+  
+  # Function to process each component of osm_feature
+  process_feature <- function(feature) {
+    if (!is.null(feature)) {
+        feature %>% filter(sf::st_is_valid(.)) %>% 
+        dplyr::select(where(not_all_na)) %>% 
+        st_centroid()
+      
+    } else {
+      NULL
+    }
+  }
+  
+  osm_points <- process_feature(osm_feature$osm_points)
+  osm_lines <- process_feature(osm_feature$osm_lines)
+  osm_polygons <- process_feature(osm_feature$osm_polygons)
+  osm_multilines <- process_feature(osm_feature$osm_multilines)
+  osm_multipolygons <- process_feature(osm_feature$osm_multipolygons)
+  
+  results <- bind_rows(osm_points, osm_lines, osm_polygons, 
+                       osm_multilines, osm_multipolygons)
+  
+  return(results)
+}
+
+```
+
+```{r}
+# apply the function
+
+# london_bar <- get_feature(key = 'amenity', value = 'bar') # 3116
+# london_pub <- get_feature(key = 'amenity', value = 'pub') # 20020
+# london_barpub <- get_feature(key = 'amenity', value = c('bar', 'pub')) # 23092 
+# london_cafe <- get_feature(key = 'amenity', value = 'cafe') # 16437
+london_restaurant <- get_feature(key = 'amenity', value = 'restaurant') # 24540
+london_mall <- get_feature(key = 'shop', value = 'mall') # 3861
+london_convenience <- get_feature(key = 'shop', value = 'convenience') # 14654
+
+london_bus_stop <- get_feature(key = 'highway', value = 'bus_stop') # 24139
+london_subway_entrance <- get_feature(key = 'railway', value = 'subway_entrance') # 560
+london_railway_station <- get_feature(key = 'public_transport', value = 'station') # 1935
+
+london_attraction <- get_feature(key = 'tourism', value = 'attraction') # 7637
+london_museum <- get_feature(key = 'tourism', value = 'museum') # 2259
+london_theatre <- get_feature(key = 'amenity', value = 'theatre') # 2738
+# london_gallery <- get_feature(key = 'tourism', value = 'gallery') # 952
+```
+
+
+## data to QGIS
+```{r}
+london_restaurant_poi <- 
+  st_transform(london_restaurant, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_restaurant_poi, "london_restaurant_poi.shp")
+
+london_mall_poi <- 
+  st_transform(london_mall, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_mall_poi, "london_mall_poi.shp")
+
+london_convenience_poi <- 
+  st_transform(london_convenience, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_convenience_poi, "london_convenience_poi.shp")
+
+
+
+london_bus_stop_poi <- 
+  st_transform(london_bus_stop, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_bus_stop_poi, "london_bus_stop_poi.shp")
+
+london_subway_entrance_poi <- 
+  st_transform(london_subway_entrance, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_subway_entrance_poi, "london_subway_entrance_poi.shp")
+
+london_railway_station_poi <- 
+  st_transform(london_railway_station, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_railway_station_poi, "london_railway_station_poi.shp")
+
+
+
+
+london_attraction_poi <- 
+  st_transform(london_attraction, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_attraction_poi, "london_attraction_poi.shp")
+
+london_museum_poi <- 
+  st_transform(london_museum, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_museum_poi, "london_museum_poi.shp")
+
+london_theatre_poi <- 
+  st_transform(london_theatre, st_crs(listings_sf)) %>% 
+  dplyr::select(osm_id, geometry)
+st_write(london_theatre_poi, "london_theatre_poi.shp")
+```
+
+
+
+## Distance
+
+```{r}
+# Define the function
+calculate_distance_to_poi <- function(price_sf, poi) {
+  # Transform CRS
+  poi <- st_transform(poi, st_crs(price_sf))
+  
+  # Find nearest points and calculate distance
+  distances <- st_distance(price_sf, poi)
+  
+  # Get the minimum distance for each listing point
+  min_distances <- apply(distances, 1, min) / 1000 # distances in units of CRS
+  
+  
+  return(as.data.frame(min_distances))
+}
+
+
+
+mall_dist <- calculate_distance_to_poi(Price_sf, mall_sf)
+subway_entrance_dist <- calculate_distance_to_poi(Price_sf, subway_entrance_sf)
+railway_station_dist <- calculate_distance_to_poi(Price_sf, railway_station_sf)
+attraction_dist <- calculate_distance_to_poi(Price_sf, attraction_sf)
+museum_dist <- calculate_distance_to_poi(Price_sf, museum_sf)
+theatre_dist <- calculate_distance_to_poi(Price_sf, theatre_sf)
+# gallery_dist_km <- calculate_distance_to_poi(Price_sf, london_gallery)
+```
+
+
+# POIs sf
+```{r}
+restaurant_sf <- read_sf("data/restaurant_sf.shp") # 25996
+mall_sf <- read_sf("data/mall_sf.shp") # 3113
+convenience_sf <- read_sf("data/convenience_sf.shp") # 15270
+
+bus_stop_sf <- read_sf("data/bus_stop_sf.shp") # 19939
+subway_entrance_sf <- read_sf("data/subway_entrance_sf.shp") # 552
+railway_station_sf <- read_sf("data/railway_station_sf.shp") # 1740
+
+attraction_sf <- read_sf("data/attraction_sf.shp") # 7094
+museum_sf <- read_sf("data/museum_sf.shp") # 2194
+theatre_sf <- read_sf("data/theatre_sf.shp") # 2653
+```
+
+
+## POI plot
+```{r}
+p1 <- ggplot() +
+  geom_sf(data = restaurant_sf, color = "indianred3", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Restaurant") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+
+
+p2 <- ggplot() +
+  geom_sf(data = mall_sf, color = "cornflowerblue", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Shopping Mall") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+p3 <- ggplot() +
+  geom_sf(data = convenience_sf, color = "darkgoldenrod2", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Convenience Shop") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+p4 <- ggplot() +
+  geom_sf(data = bus_stop_sf, color = "mediumpurple1", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Bus Stop") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+
+p5 <- ggplot() +
+  geom_sf(data = subway_entrance_sf, color = "palevioletred3", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Subway Entrance") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+p6 <- ggplot() +
+  geom_sf(data = railway_station_sf, color = "springgreen3", 
+          size = 0.6) +
+   geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Railway Station") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+
+p7 <- ggplot() +
+  geom_sf(data = attraction_sf, color = "darkgreen", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Attraction") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+p8 <- ggplot() +
+  geom_sf(data = museum_sf, color = "sienna2", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE) +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Museum") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+p9 <- ggplot() +
+  geom_sf(data = theatre_sf, color = "royalblue3", 
+          size = 0.6) +
+  geom_sf(data = borough_sf, fill = NA, color = "black") +
+  theme_void() + 
+  ggsn::scalebar(data = borough_sf, dist = 5, dist_unit = "km",
+                 location = "bottomright", transform = FALSE, model = "WGS84",
+                 st.size = 3.2, border.size = 0.3, st.bottom = FALSE)  +
+  ggsn::north(data = borough_sf, location = "topright", scale = 0.13, symbol = 1) +
+  labs(title = "Theatre") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# Arrange and save the plots
+# ggsave("my_plot.png", grid.arrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, nrow = 3), width = 15, height = 15)
+
+
+grid.arrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, nrow = 3)
+```
+
+
+## number of POI within 500/1000 meters
+```{r}
+restaurant_1km <- read_sf("data/restaurant_1km.shp") %>% as.data.frame() %>% 
+  dplyr::select(ID, NUMPOINTS) %>% 
+  dplyr::rename(restaurant_1km = NUMPOINTS)
+
+
+convenience_500m <- read_sf("data/convenience_500m.shp") %>% as.data.frame() %>% 
+  dplyr::select(ID, convenienc) %>% 
+  dplyr::rename(convenience_500m = convenienc)
+
+
+bus_stop_500m <- read_sf("data/bus_stop_500m.shp") %>% as.data.frame() %>% 
+  dplyr::select(ID, NUMPOINTS) %>% 
+  dplyr::rename(bus_stop_500m = NUMPOINTS)
+
+```
+
+## Merge all the data
+```{r}
+listings_poi <- listings %>%
+  
+  # restaurant_1km
+  left_join(restaurant_1km, join_by(ID == ID)) %>% 
+   # mall_dist
+  cbind(mall_dist) %>% 
+  dplyr::rename(mall_dist= min_distances) %>% 
+  # convenience_500m
+  left_join(convenience_500m, join_by(ID == ID)) %>% 
+  
+  # bus_stop_500m
+  left_join(bus_stop_500m, join_by(ID == ID)) %>% 
+  # subway_entrance_dist
+  cbind(subway_entrance_dist) %>% 
+  dplyr::rename(subway_entrance_dist = min_distances) %>% 
+  # railway_station_dist
+  cbind(railway_station_dist) %>% 
+  dplyr::rename(railway_station_dist = min_distances) %>% 
+  
+  # attraction_dist
+  cbind(attraction_dist) %>% 
+  dplyr::rename(attraction_dist = min_distances) %>% 
+  # museum_dist
+  cbind(museum_dist) %>% 
+  dplyr::rename(museum_dist = min_distances) %>%
+  # theatre_dist
+  cbind(theatre_dist) %>% 
+  dplyr::rename(theatre_dist = min_distances)
+
+
+sum(is.na(listings_poi))
+
+# write.csv(listings_poi, "Total_Listings.csv")
+
+```
+
+
+# Intervel Distribution Plot of All Independent Variables
+```{r}
+pp1 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = accommodates), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$accommodates), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Accommodate", x = NULL, y = NULL)
+
+
+pp2 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = bathrooms), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$bathrooms), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Bathroom", x = NULL, y = NULL)
+
+pp3 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = bedrooms), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$bedrooms), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Bedroom", x = NULL, y = NULL)
+
+
+pp4 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = amenities_num), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$amenities_num), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Number of Amenities", x = NULL, y = NULL)
+
+
+pp5 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = number_of_reviews_l30d), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$number_of_reviews_l30d), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Number of Reviews in Last 30 Days", x = NULL, y = NULL)
+
+
+pp6 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = review_scores_location), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$review_scores_location), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Review Scores on Location", x = NULL, y = NULL)
+
+
+pp7 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = review_scores_value), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$review_scores_value), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Review Scores on Value", x = NULL, y = NULL)
+
+
+pp8 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = availability_60), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$availability_60), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Availability Day in Next 60 Days", x = NULL, y = NULL)
+
+Listings$instant_bookable <- as.numeric(Listings$instant_bookable)
+Listings$host_is_superhost <- as.numeric(Listings$host_is_superhost)
+Listings$host_identity_verified <- as.numeric(Listings$host_identity_verified)
+  
+pp9 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = instant_bookable), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$instant_bookable), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Instant Bookable", x = NULL, y = NULL)
+
+
+pp10 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = host_is_superhost), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$host_is_superhost), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Host is Superhost", x = NULL, y = NULL)
+
+
+pp11 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = host_identity_verified), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$host_identity_verified), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Host Identity is Verified", x = NULL, y = NULL)
+
+
+
+pp12 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = calculated_host_listings_count), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$calculated_host_listings_count), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Calculated Host Listings Count", x = NULL, y = NULL)
+
+
+
+p_1 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = restaurant_1km), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$restaurant_1km), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Restaurant", x = NULL, y = NULL)
+
+
+p_2 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = mall_dist), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$mall_dist), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Shopping Mall", x = NULL, y = NULL)
+
+
+p_3 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = convenience_500m), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$convenience_500m), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Convenience Shop", x = NULL, y = NULL)
+
+
+p_4 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = bus_stop_500m), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$bus_stop_500m), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Bus Stop", x = NULL, y = NULL)
+
+
+p_5 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = subway_entrance_dist), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$subway_entrance_dist), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Subway Entrance", x = NULL, y = NULL)
+
+
+p_6 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = railway_station_dist), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$railway_station_dist), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Railway Station", x = NULL, y = NULL)
+
+
+p_7 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = attraction_dist), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$attraction_dist), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Attraction", x = NULL, y = NULL)
+
+p_8 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = museum_dist), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$museum_dist), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Museum", x = NULL, y = NULL)
+
+p_9 <- listings_poi %>% 
+  ggplot() +
+  theme_minimal() +
+  geom_histogram(mapping=aes(x = theatre_dist), 
+                 color = "grey40", alpha = 1, bins = 50, fill="skyblue1") +
+  geom_vline(xintercept = mean(Listings$theatre_dist), color = "indianred1") +
+  theme(axis.ticks.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 10)) +
+  labs(title = "Theatre", x = NULL, y = NULL)
+
+grid.arrange(pp1, pp2, pp3, pp4, pp5, pp6, pp7, pp8, pp9, pp10, pp11, pp12,
+             p_1, p_2, p_3, p_4, p_5, p_6, p_7, p_8, p_9,
+             ncol = 3)
+
+
+ggsave("pp.png", 
+       grid.arrange(pp1, pp2, pp3, pp4, pp5, pp6, pp7, pp8, pp9, pp10, pp11, pp12,
+                    p_1, p_2, p_3, p_4, p_5, p_6, p_7, p_8, p_9,
+                    ncol = 3),
+       width = 9, height = 12)
+```
+
+
+
+# Dependent Variable - Listings Price / lnPrice
+
+### Density
+
+```{r}
+skewness(Price$Price) # 3.526329
+skewness(Price$lnPrice) # 0.6360177
+# A skewness value > 0 means that there is more weight in the left tail of the distribution (positive skew)
+#  stabilize variance using logarithmic transformations
+
+
+p1 <- Price %>% ggplot() +
+  geom_histogram(mapping=aes(x = Price, y=..density..), 
+                 color = "grey40", alpha = 1, bins=40, fill="cornsilk") + 
+  geom_density(mapping = aes(x = Price), color="black") +
+  geom_vline(xintercept = mean(Price$Price), color = "indianred1") +
+  labs(title = "Density Distribution of Listing Price", x = "Price (£)", y = "Density") +
+   theme_classic() +
+   theme (axis.ticks.y = element_blank(),
+          legend.position = "none",
+          axis.ticks.x = element_blank(),
+          plot.title = element_text(face = "bold", hjust = 0.5, size = 10))
+
+
+p2 <- Price %>% ggplot() +
+  geom_histogram(mapping=aes(x = lnPrice, y=..density..), 
+                 color = "grey40",alpha = 1, bins=40, fill="cornsilk") +
+  geom_density(mapping = aes(x = lnPrice), color="black") +
+  geom_vline(xintercept = mean(Price$lnPrice), color = "indianred1") +
+  labs(title = "Density Distribution of Listing lnPrice", x = "lnPrice (£)", y = "Density") +  theme_classic() +
+   theme (axis.ticks.y = element_blank(),
+          legend.position = "none",
+          axis.ticks.x = element_blank(),
+          plot.title = element_text(face = "bold", hjust = 0.5, size = 10))
+
+grid.arrange(p1, p2, ncol = 1)
+```
+
+### Boxplot by borough
+
+```{r}
+# Calculate median price for each borough
+borough_medians <- with(listings, tapply(Price, neighbourhood_cleansed, median, na.rm = TRUE))
+
+test <- listings
+# Reorder factor levels of 'neighbourhood_cleansed' based on median price
+test$neighbourhood_cleansed <- with(listings, reorder(neighbourhood_cleansed, Price, FUN = median))
+
+# Plot
+borough1 <- ggplot(data = test, 
+       aes(x = Price, y = neighbourhood_cleansed, 
+           color = neighbourhood_cleansed)) + 
+   geom_boxplot() + 
+   theme_classic() +
+   theme(legend.position="none",
+         plot.title = element_text(hjust = 0.5, size = 21, face = "bold"), 
+         axis.title.x = element_text(size = 18, face = "bold"), 
+         axis.title.y = element_text(size = 18, face = "bold"),
+         axis.text = element_text(size = 15, face = "bold")) +
+ labs(x = "Price (£)", y = "Borough")
+
+
+ # Save the plot with a height of 10 inches
+ggsave("borough1.png", plot = borough1, height = 12, width = 12, units = "in")
+```
+
+
+

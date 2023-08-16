@@ -1,0 +1,212 @@
+---
+title: "Variable Selection and Importance"
+author: "Yu Zhou"
+date: "2023-07-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load library
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(sf)
+library(tmap)
+library(gridExtra)
+library(e1071)
+library(spatstat)
+library(geojsonio)
+library(gstat)
+library(raster)
+library(spdep)
+library(osrm)
+library(osmdata)
+library(RColorBrewer)
+library(fixest)
+library(car)
+library(tmaptools)
+library(OpenStreetMap)
+library(sp)
+library(gstat)
+library(tmap)
+library(classInt)
+library(viridis)
+library(viridisLite)
+library(ggsn)
+library(ggspatial)
+library(prettymapr)
+library(sp)
+library(spdep)
+library(MASS)
+```
+
+
+# Import data
+This dataset is based on the 2023-03-14 London extract from Inside Airbnb. 
+The original set includes AirBnb property listings with characteristics and price, and this is extended to additional variables based on each property’s location.
+```{r}
+raw <- read.csv("data/listings.csv") 
+```
+
+
+# Clean data
+```{r}
+raw$Price <- as.numeric(gsub(",", "", gsub("\\$", "", raw$price)))
+
+# table(raw$room_type)
+# listings_apt <- listing %>% filter(room_type == "Entire home/apt") 
+# quantile(listings_apt$Price, probs = c(0.01, 0.99))
+
+new <- raw %>% 
+  filter(room_type == "Entire home/apt", 
+         Price >= 45 & Price <= 1500) %>% 
+  dplyr::select(Price, 
+                host_since,
+                host_is_superhost, host_listings_count, host_total_listings_count,
+                host_has_profile_pic, host_identity_verified, neighbourhood_cleansed,
+                latitude, longitude, accommodates,
+                bathrooms_text, bedrooms, beds, amenities,
+                minimum_nights, maximum_nights, 
+                minimum_minimum_nights, maximum_minimum_nights, 
+                minimum_maximum_nights, maximum_maximum_nights, 
+                minimum_nights_avg_ntm, maximum_nights_avg_ntm,
+                has_availability, availability_30, availability_60,
+                availability_90, availability_365,
+                number_of_reviews, number_of_reviews_ltm, number_of_reviews_l30d,
+                review_scores_rating, review_scores_accuracy, review_scores_cleanliness,
+                review_scores_checkin, review_scores_communication, review_scores_location,
+                review_scores_value, instant_bookable, calculated_host_listings_count, 
+                calculated_host_listings_count_entire_homes,
+                calculated_host_listings_count_private_rooms,
+                calculated_host_listings_count_shared_rooms,
+                reviews_per_month) 
+  
+
+# host_since
+new$host_since <- as.Date(new$host_since)
+new$host_since <- as.Date("2023-03-14") - new$host_since
+new$host_since <- as.numeric(str_replace(new$host_since, " days", ""))/365
+
+
+# host_is_superhost
+new$host_is_superhost <- ifelse(new$host_is_superhost == "t", TRUE, FALSE)
+# new$host_is_superhost <- as.factor(new$host_is_superhost)
+
+# host_has_profile_pic
+new$host_has_profile_pic <- ifelse(new$host_has_profile_pic == "t", TRUE, FALSE)
+# new$host_has_profile_pic <- as.factor(new$host_has_profile_pic)
+
+# host_identity_verified
+new$host_identity_verified <- ifelse(new$host_identity_verified == "t", TRUE, FALSE)
+# new$host_identity_verified <- as.factor(new$host_identity_verified)
+
+# property_type
+# new$property_type <- as.factor(new$property_type)
+
+# bathrooms_text
+new$bathrooms_text <- str_replace(new$bathrooms_text, "Half-bath", "0.5 baths")
+# table(new$bathrooms_text)
+new$bathrooms <- as.numeric(str_extract(new$bathrooms_text, "\\d+\\.?\\d*|\\d+"))
+# table(new$bathrooms)
+# sum(is.na(new$bathrooms))
+
+# amenities
+new$amenities <- gsub("\\[|\\]|\"", "", new$amenities)
+amenities_list <- strsplit(new$amenities, ', ')
+amenities_length <- sapply(amenities_list, length)
+new$amenities_num <- amenities_length
+
+# has_availability
+new$has_availability <- ifelse(new$has_availability == "t", TRUE, FALSE)
+# new$has_availability <- as.factor(new$has_availability)
+
+# instant_bookable
+new$instant_bookable <- ifelse(new$instant_bookable == "t", TRUE, FALSE)
+# new$instant_bookable <- as.factor(new$instant_bookable)
+
+
+nn <- new %>%  
+  mutate(lnPrice = log(Price)) %>% 
+  dplyr::select(Price, lnPrice, 
+                host_since,
+                host_is_superhost, host_listings_count, host_total_listings_count,
+                host_has_profile_pic, host_identity_verified,
+                neighbourhood_cleansed,
+                latitude, longitude, accommodates,
+                bathrooms, bedrooms, beds, amenities_num,
+                minimum_nights, maximum_nights, 
+                minimum_minimum_nights, maximum_minimum_nights, 
+                minimum_maximum_nights, maximum_maximum_nights, 
+                minimum_nights_avg_ntm, maximum_nights_avg_ntm,
+                has_availability, availability_30, availability_60,
+                availability_90, availability_365,
+                number_of_reviews, number_of_reviews_ltm, number_of_reviews_l30d,
+                review_scores_rating, review_scores_accuracy, review_scores_cleanliness,
+                review_scores_checkin, review_scores_communication, review_scores_location,
+                review_scores_value, 
+                instant_bookable, calculated_host_listings_count, 
+                calculated_host_listings_count_entire_homes, calculated_host_listings_count_private_rooms, calculated_host_listings_count_shared_rooms,
+                reviews_per_month) %>% 
+  na.omit() # 31,656 / 45 factors
+
+
+```
+
+
+# Feature Importance
+# Hybird
+```{r}
+base.mod <- lm(lnPrice ~ 1 , data = nn) # base intercept only model
+summary(base.mod)
+
+
+all.mod <- lm(lnPrice ~ host_since + 
+                host_is_superhost + host_listings_count + host_total_listings_count +
+                host_has_profile_pic + host_identity_verified +
+                neighbourhood_cleansed + latitude + longitude +
+                accommodates +
+                bathrooms + bedrooms + beds + amenities_num +
+                minimum_nights + maximum_nights +
+                minimum_minimum_nights + maximum_minimum_nights +
+                minimum_maximum_nights + maximum_maximum_nights +
+                minimum_nights_avg_ntm + maximum_nights_avg_ntm + 
+                has_availability + availability_30 + availability_60 +
+                availability_90 + availability_365 + 
+                number_of_reviews + number_of_reviews_ltm + number_of_reviews_l30d +
+                review_scores_rating + review_scores_accuracy + review_scores_cleanliness +
+                review_scores_checkin + review_scores_communication + 
+                review_scores_location + review_scores_value + 
+                instant_bookable + calculated_host_listings_count +
+                calculated_host_listings_count_entire_homes +
+                calculated_host_listings_count_private_rooms + 
+                calculated_host_listings_count_shared_rooms +
+                reviews_per_month, 
+              data = nn) # full model with all predictors
+summary(all.mod) # 0.5736
+
+
+
+stepMod <- step(base.mod, 
+                scope = list(lower = base.mod, upper = all.mod), 
+                direction = "both", trace = 1, steps = 1000) # perform step-wise algorithm
+
+
+# Get the coefficients
+coefficients <- coef(stepMod)
+
+# Convert to data frame
+coefficients_df <- data.frame(
+  Variable = names(coefficients),
+  Coefficient = round(coefficients, 5),
+  abs_cof = abs(round(coefficients, 5))) %>% 
+  arrange(desc(abs_cof))
+
+
+
+# Write data frame to CSV
+# write.csv(coefficients_df, "step.csv", row.names = FALSE)
+
+```
